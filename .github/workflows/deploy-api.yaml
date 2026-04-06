@@ -41,7 +41,7 @@ jobs: #cambiar todo
           username: ${{ secrets.DOCKER_USERNAME }}
           password: ${{ secrets.DOCKER_PASSWORD }}
       - name: 3 . Armar la imagen y publicarla
-        run  |
+        run: |
           IMAGEN_COMPLETA="${{ secrets.DOCKER_USERNAME }}/${{ inputs.image-name }}"
           docker build \
             -t "${IMAGEN_COMPLETA}:${{ inputs.image-tag }}" \
