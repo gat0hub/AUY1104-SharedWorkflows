@@ -84,9 +84,7 @@ jobs:
         run: npm install
 
       - name: 3 · Ejecutar tests
-        run: |
-          echo "Forzando fallo en los tests para la evaluación 4.3..."
-          exit 1
+        run: npm test
 
   # ───────────────────────────────────────────────────────────
   # Etapa 2 · Construcción y publicación de la imagen Docker
