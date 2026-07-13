@@ -125,72 +125,91 @@ jobs:
           docker push --all-tags "${IMAGEN_COMPLETA}"
 
   # ───────────────────────────────────────────────────────────
-  # Etapa 3 · Deploy al cluster K3S en AWS
+  # Etapa 3 · Deploy Blue-Green al cluster K3S en AWS
   # ───────────────────────────────────────────────────────────
 
   deploy-to-k8s:
-    name: Deploy to AWS K3S
+    name: Deploy to AWS K3S (Blue-Green)
     needs: build-and-push
     runs-on: ubuntu-latest
 
     steps:
+      - name: Checkout (manifiestos K8s)
+        uses: actions/checkout@v4
+
       - name: Configurar SSH Agent
         uses: webfactory/ssh-agent@v0.9.0
         with:
           ssh-private-key: ${{ secrets.EA2_SSH_PRIVATE_KEY }}
 
-      - name: 1 · SSH al servidor K3S
+      # --- ÍTEM 2: ESTRATEGIA BLUE-GREEN ---
+      - name: 1 · Determinar Color Activo e Inactivo (Target)
+        id: color
         run: |
-          ssh -o StrictHostKeyChecking=accept-new \
-            "ubuntu@${{ inputs.k3s-server-public-ip }}" \
-            'echo ok'
+          # Se conecta por SSH y lee a qué color apunta el servicio actualmente
+          ACTIVE_COLOR=$(ssh -o StrictHostKeyChecking=accept-new ubuntu@${{ inputs.k3s-server-public-ip }} "sudo k3s kubectl get service shared-client-service -o=jsonpath='{.spec.selector.color}'" || echo "blue")
+          
+          if [ "$ACTIVE_COLOR" == "blue" ]; then
+            TARGET_COLOR="green"
+          else
+            TARGET_COLOR="blue"
+          fi
+          
+          echo "active=$ACTIVE_COLOR" >> $GITHUB_OUTPUT
+          echo "target=$TARGET_COLOR" >> $GITHUB_OUTPUT
+          echo "Color actual: $ACTIVE_COLOR. Desplegando en: $TARGET_COLOR"
 
-      # Manifiestos Kubernetes viven en el repo cliente
-      - name: Checkout (manifiestos K8s)
-        uses: actions/checkout@v4
-
-      - name: Copiar k8s/ al servidor
+      # --- ÍTEM 1: INYECCIÓN DE VARIABLES DINÁMICAS ---
+      - name: 2 · Inyectar variables en manifiestos locales
+        env:
+          IMAGE_TAG: ${{ inputs.image-tag }}
+          COLOR: ${{ steps.color.outputs.target }}
+          # Armamos la ruta completa de la imagen para el YAML
+          FULL_IMAGE: ${{ secrets.DOCKER_USERNAME }}/${{ inputs.image-name }}:${{ inputs.image-tag }}
         run: |
-          set -euo pipefail
+          mkdir -p k8s-parsed
+          # Usamos envsubst para reemplazar ${COLOR} y ${FULL_IMAGE} en los archivos originales
+          for file in k8s/*.yaml; do
+            envsubst < "$file" > "k8s-parsed/$(basename "$file")"
+          done
 
-          test -d k8s || {
-            echo "::error::Falta carpeta k8s/ en la raíz del repo"
-            exit 1
-          }
-
-          ssh -o StrictHostKeyChecking=accept-new \
-            "ubuntu@${{ inputs.k3s-server-public-ip }}" \
-            'sudo rm -rf /tmp/k8s-deploy'
-
-          scp -o StrictHostKeyChecking=accept-new -r k8s \
-            "ubuntu@${{ inputs.k3s-server-public-ip }}:/tmp/k8s-deploy"
-
-      # ───────────────────────────────────────────────────────────
-      # IMPLEMENTACIÓN DEL REQUISITO 4.2 COMPLIANT CON LA RÚBRICA
-      # ───────────────────────────────────────────────────────────
-
-      - name: Deploy to k3s
-        id: deploy
+      - name: 3 · Copiar manifiestos inyectados al servidor K3S
         run: |
-          # Aplica los cambios de Kubernetes y vigila el estado del rollout.
-          # Si pasa de 60s o falla, el comando retornará un código de salida no-cero y el step fallará.
-          ssh -o StrictHostKeyChecking=accept-new \
-            "ubuntu@${{ inputs.k3s-server-public-ip }}" \
-            'sudo k3s kubectl apply -f /tmp/k8s-deploy/ && \
-             sudo k3s kubectl rollout status deployment/demo-api --timeout=60s'
+          ssh -o StrictHostKeyChecking=accept-new "ubuntu@${{ inputs.k3s-server-public-ip }}" 'sudo rm -rf /tmp/k8s-deploy && mkdir -p /tmp/k8s-deploy'
+          # Copiamos la carpeta con los YAML ya procesados
+          scp -o StrictHostKeyChecking=accept-new k8s-parsed/*.yaml "ubuntu@${{ inputs.k3s-server-public-ip }}:/tmp/k8s-deploy/"
 
-      - name: Rollback automático
+      - name: 4 · Desplegar versión inactiva (Nueva versión)
+        run: |
+          # Aplicamos SOLO el deployment para no cambiar el tráfico en el service todavía
+          ssh -o StrictHostKeyChecking=accept-new "ubuntu@${{ inputs.k3s-server-public-ip }}" \
+            "sudo k3s kubectl apply -f /tmp/k8s-deploy/deployment.yaml && \
+             sudo k3s kubectl rollout status deployment/shared-client-${{ steps.color.outputs.target }} --timeout=60s"
+
+      # --- ÍTEM 2: VALIDACIÓN DE SALUD ---
+      - name: 5 · Validación de Salud (Health Check)
+        run: |
+          echo "Esperando 10s para que los pods estabilicen..."
+          sleep 10
+          # Evaluamos si la nueva versión levantó correctamente vía SSH
+          ssh -o StrictHostKeyChecking=accept-new "ubuntu@${{ inputs.k3s-server-public-ip }}" \
+            "UNHEALTHY=\$(sudo k3s kubectl get pods -l color=${{ steps.color.outputs.target }} -o jsonpath='{.items[*].status.containerStatuses[*].ready}' | grep -c 'false' || true); \
+             if [ \"\$UNHEALTHY\" -gt \"0\" ]; then echo 'Error: Hay pods defectuosos. Abortando.'; exit 1; fi"
+
+      - name: 6 · Cambiar Tráfico al Nuevo Color (Switch)
+        run: |
+          # Si la validación fue exitosa, parcheamos el Service para que apunte al nuevo color
+          ssh -o StrictHostKeyChecking=accept-new "ubuntu@${{ inputs.k3s-server-public-ip }}" \
+            "sudo k3s kubectl patch service shared-client-service -p '{\"spec\":{\"selector\":{\"color\":\"${{ steps.color.outputs.target }}\"}}}'"
+          echo "Tráfico redirigido al 100% a la versión ${{ steps.color.outputs.target }}."
+
+      # --- ÍTEM 3: PREPARACIÓN PARA EL CAOS Y ROLLBACK AUTOMÁTICO ---
+      - name: 7 · Rollback Automático
         if: failure()
         run: |
-          # Este paso se dispara de manera 100% nativa solo si el paso anterior ('deploy') falla.
-          ssh -o StrictHostKeyChecking=accept-new \
-            "ubuntu@${{ inputs.k3s-server-public-ip }}" \
-            'sudo k3s kubectl rollout undo deployment/demo-api && \
-             sudo k3s kubectl rollout status deployment/demo-api --timeout=60s'
-
-      - name: Verificar pods
-        if: always()
-        run: |
-          ssh -o StrictHostKeyChecking=accept-new \
-            "ubuntu@${{ inputs.k3s-server-public-ip }}" \
-            'sudo k3s kubectl get pods -o wide'
+          echo "¡Se detectó un fallo en el despliegue o la validación! Iniciando Rollback Automático."
+          # Al estar en Blue-Green, el "rollback" es simplemente borrar el Deployment nuevo defectuoso.
+          # Los usuarios nunca vieron el error porque el Service nunca cambió de color.
+          ssh -o StrictHostKeyChecking=accept-new "ubuntu@${{ inputs.k3s-server-public-ip }}" \
+            "sudo k3s kubectl delete deployment shared-client-${{ steps.color.outputs.target }} --ignore-not-found=true"
+          echo "Sistema remediado. El clúster se mantiene estable en la versión anterior."
