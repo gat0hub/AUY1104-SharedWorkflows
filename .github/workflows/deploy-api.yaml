@@ -179,9 +179,14 @@ jobs:
           # Copiamos la carpeta con los YAML ya procesados
           scp -o StrictHostKeyChecking=accept-new k8s-parsed/*.yaml "ubuntu@${{ inputs.k3s-server-public-ip }}:/tmp/k8s-deploy/"
 
-      - name: 4 · Desplegar versión inactiva (Nueva versión)
+      - name: 4 · Desplegar infraestructura base y nueva versión
         run: |
-          # Aplicamos SOLO el deployment para no cambiar el tráfico en el service todavía
+          # 1. Aplicamos el Nginx y el Service base para que existan en el clúster
+          ssh -o StrictHostKeyChecking=accept-new "ubuntu@${{ inputs.k3s-server-public-ip }}" \
+            "sudo k3s kubectl apply -f /tmp/k8s-deploy/nginx.yaml --ignore-not-found=true || true && \
+             sudo k3s kubectl apply -f /tmp/k8s-deploy/service.yaml"
+
+          # 2. Aplicamos el deployment dinámico (Blue o Green)
           ssh -o StrictHostKeyChecking=accept-new "ubuntu@${{ inputs.k3s-server-public-ip }}" \
             "sudo k3s kubectl apply -f /tmp/k8s-deploy/deployment.yaml && \
              sudo k3s kubectl rollout status deployment/demo-api-${{ steps.color.outputs.target }} --timeout=60s"
