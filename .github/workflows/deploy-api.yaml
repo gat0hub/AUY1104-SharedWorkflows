@@ -87,7 +87,7 @@ jobs:
           IMAGE: ${{ secrets.DOCKER_USERNAME }}/${{ inputs.image-name }}:${{ inputs.image-tag }}
         run: |
           mkdir -p k8s-ready
-          # envsubst es mucho más limpio que el comando perl del código anterior
+          
           for file in k8s/*.yaml; do
             envsubst < "$file" > "k8s-ready/$(basename "$file")"
           done
