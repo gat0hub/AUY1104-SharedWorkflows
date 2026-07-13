@@ -147,7 +147,7 @@ jobs:
         id: color
         run: |
           # Se conecta por SSH y lee a qué color apunta el servicio actualmente
-          ACTIVE_COLOR=$(ssh -o StrictHostKeyChecking=accept-new ubuntu@${{ inputs.k3s-server-public-ip }} "sudo k3s kubectl get service shared-client-service -o=jsonpath='{.spec.selector.color}'" || echo "blue")
+          ACTIVE_COLOR=$(ssh -o StrictHostKeyChecking=accept-new ubuntu@${{ inputs.k3s-server-public-ip }} "sudo k3s kubectl get service demo-api -o=jsonpath='{.spec.selector.color}'" || echo "blue")
           
           if [ "$ACTIVE_COLOR" == "blue" ]; then
             TARGET_COLOR="green"
@@ -184,7 +184,7 @@ jobs:
           # Aplicamos SOLO el deployment para no cambiar el tráfico en el service todavía
           ssh -o StrictHostKeyChecking=accept-new "ubuntu@${{ inputs.k3s-server-public-ip }}" \
             "sudo k3s kubectl apply -f /tmp/k8s-deploy/deployment.yaml && \
-             sudo k3s kubectl rollout status deployment/shared-client-${{ steps.color.outputs.target }} --timeout=60s"
+             sudo k3s kubectl rollout status deployment/demo-api-${{ steps.color.outputs.target }} --timeout=60s"
 
       # --- ÍTEM 2: VALIDACIÓN DE SALUD ---
       - name: 5 · Validación de Salud (Health Check)
@@ -200,7 +200,7 @@ jobs:
         run: |
           # Si la validación fue exitosa, parcheamos el Service para que apunte al nuevo color
           ssh -o StrictHostKeyChecking=accept-new "ubuntu@${{ inputs.k3s-server-public-ip }}" \
-            "sudo k3s kubectl patch service shared-client-service -p '{\"spec\":{\"selector\":{\"color\":\"${{ steps.color.outputs.target }}\"}}}'"
+            "sudo k3s kubectl patch service demo-api -p '{\"spec\":{\"selector\":{\"color\":\"${{ steps.color.outputs.target }}\"}}}'"
           echo "Tráfico redirigido al 100% a la versión ${{ steps.color.outputs.target }}."
 
       # --- ÍTEM 3: PREPARACIÓN PARA EL CAOS Y ROLLBACK AUTOMÁTICO ---
@@ -211,5 +211,5 @@ jobs:
           # Al estar en Blue-Green, el "rollback" es simplemente borrar el Deployment nuevo defectuoso.
           # Los usuarios nunca vieron el error porque el Service nunca cambió de color.
           ssh -o StrictHostKeyChecking=accept-new "ubuntu@${{ inputs.k3s-server-public-ip }}" \
-            "sudo k3s kubectl delete deployment shared-client-${{ steps.color.outputs.target }} --ignore-not-found=true"
+            "sudo k3s kubectl delete deployment demo-api-${{ steps.color.outputs.target }} --ignore-not-found=true"
           echo "Sistema remediado. El clúster se mantiene estable en la versión anterior."
